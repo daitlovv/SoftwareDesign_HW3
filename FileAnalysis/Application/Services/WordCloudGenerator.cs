@@ -23,7 +23,7 @@ public class WordCloudGenerator : IWordCloudGenerator
     {
         try
         {
-            Report report = await reportRepository.GetByIdAsync(reportId);
+            var report = await reportRepository.GetByIdAsync(reportId);
             
             if (report == null)
             {
