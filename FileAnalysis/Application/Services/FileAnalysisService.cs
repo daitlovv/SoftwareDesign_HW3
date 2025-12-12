@@ -1,186 +1,106 @@
-using FileAnalysis.Application.DTOs;
-using FileAnalysis.Application.Interfaces;
-using FileAnalysis.Application.Services;
 using FileAnalysis.Domain.Entities;
 using FileAnalysis.Infrastructure.Repositories;
 
-namespace FileAnalysis.Application;
+namespace FileAnalysis.Application.Services;
 
-public class FileAnalysisService : IFileAnalysisService
+public class WordCloudGenerator : IWordCloudGenerator
 {
     private readonly IReportRepository reportRepository;
-    private readonly ITextAnalyzer textAnalyzer;
-    private readonly IWordCloudGenerator wordCloudGenerator;
-    private readonly IReportResultBuilder resultBuilder;
     private readonly IFileContentProvider fileContentProvider;
-    private readonly ILogger<FileAnalysisService> logger;
+    private readonly ILogger<WordCloudGenerator> logger;
 
-    public FileAnalysisService(
+    public WordCloudGenerator(
         IReportRepository reportRepository,
-        ITextAnalyzer textAnalyzer,
-        IWordCloudGenerator wordCloudGenerator,
-        IReportResultBuilder resultBuilder,
         IFileContentProvider fileContentProvider,
-        ILogger<FileAnalysisService> logger)
+        ILogger<WordCloudGenerator> logger)
     {
         this.reportRepository = reportRepository;
-        this.textAnalyzer = textAnalyzer;
-        this.wordCloudGenerator = wordCloudGenerator;
-        this.resultBuilder = resultBuilder;
         this.fileContentProvider = fileContentProvider;
         this.logger = logger;
     }
 
-    public async Task<ReportDto> AnalyzeFileAsync(Guid fileId, string workId, string studentName)
+    public async Task<string> GenerateWordCloudAsync(Guid reportId)
     {
         try
         {
-            logger.LogInformation("Анализ файла: {FileId}, работа: {WorkId}, студент: {StudentName}", 
-                fileId, workId, studentName);
-
-            string fileContent = await fileContentProvider.GetFileContentAsync(fileId);
+            var report = await reportRepository.GetByIdAsync(reportId);
             
-            (bool hasPlagiarism, int similarity, List<string> similarStudents) = 
-                await textAnalyzer.AnalyzeForPlagiarismAsync(fileContent, workId, fileId, studentName);
-            
-            Report report = new Report
+            if (report == null)
             {
-                ReportId = Guid.NewGuid(),
-                WorkId = workId,
-                FileId = fileId,
-                StudentName = studentName,
-                Result = "",
-                HasPlagiarism = hasPlagiarism,
-                Similarity = similarity,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            await reportRepository.AddAsync(report);
-            
-            await UpdateSimilarPreviousReportsAsync(workId, fileId, studentName, fileContent);
-            
-            return resultBuilder.BuildReportDto(report, "Анализ выполнен", similarity);
-        }
-        catch (IOException ioEx)
-        {
-            logger.LogError(ioEx, "Ошибка ввода-вывода при анализе файла {FileId}", fileId);
-            throw new InvalidOperationException($"Ошибка доступа к файлу: {ioEx.Message}", ioEx);
-        }
-        catch (UnauthorizedAccessException authEx)
-        {
-            logger.LogError(authEx, "Нет доступа к файлу {FileId}", fileId);
-            throw new InvalidOperationException($"Нет доступа к файлу: {authEx.Message}", authEx);
-        }
-        catch (ArgumentNullException argEx)
-        {
-            logger.LogError(argEx, "Отсутствуют обязательные параметры для файла {FileId}", fileId);
-            throw new ArgumentException($"Обязательные параметры не указаны: {argEx.Message}", argEx);
-        }
-    }
-
-    private async Task UpdateSimilarPreviousReportsAsync(
-    string workId, 
-    Guid currentFileId, 
-    string currentStudent,
-    string currentContent)
-    {
-        try
-        {
-            IEnumerable<Report> previousReports = await reportRepository.GetByWorkIdAsync(workId);
-            List<string> currentWords = textAnalyzer.ExtractWords(currentContent);
-            
-            if (!currentWords.Any()) return;
-
-            foreach (Report previousReport in previousReports.Where(report => report.FileId != currentFileId))
-            {
-                try
-                {
-                    string previousContent = await fileContentProvider.GetFileContentAsync(previousReport.FileId);
-                    List<string> previousWords = textAnalyzer.ExtractWords(previousContent);
-                    
-                    if (!previousWords.Any()) continue;
-
-                    double similarity = textAnalyzer.CalculateSimilarity(currentWords, previousWords);
-
-                    if (similarity > 70 && !previousReport.HasPlagiarism)
-                    {
-                        previousReport.HasPlagiarism = true;
-                        previousReport.Similarity = Math.Max(previousReport.Similarity, similarity);
-                        previousReport.Result = $"Обнаружен взаимный плагиат с работой студента {currentStudent}";
-                        
-                        await reportRepository.UpdateAsync(previousReport);
-                        logger.LogInformation("Updated report {ReportId} as plagiarism", previousReport.ReportId);
-                    }
-                }
-                catch (IOException ioEx)
-                {
-                    logger.LogWarning(ioEx, "Error updating report {ReportId}", previousReport.ReportId);
-                    continue;
-                }
-                catch (UnauthorizedAccessException authEx)
-                {
-                    logger.LogWarning(authEx, "Error updating report {ReportId}", previousReport.ReportId);
-                    continue;
-                }
+                throw new KeyNotFoundException($"Отчет с ID {reportId} не найден");
             }
+
+            string fileContent = await fileContentProvider.GetFileContentAsync(report.FileId);
+            
+            if (string.IsNullOrEmpty(fileContent))
+            {
+                return GenerateWordCloudUrl("Содержимое+файла+пустое");
+            }
+            
+            string processedText = ProcessTextForWordCloud(fileContent);
+            return GenerateWordCloudUrl(processedText);
         }
-        catch (InvalidOperationException opEx)
+        catch (KeyNotFoundException keyEx)
         {
-            logger.LogError(opEx, "Error in UpdateSimilarPreviousReportsAsync");
+            logger.LogError(keyEx, "Отчет не найден для генерации облака слов {ReportId}", reportId);
+            return GenerateWordCloudUrl("Отчет+не+найден");
+        }
+        catch (InvalidOperationException invOpEx)
+        {
+            logger.LogError(invOpEx, "Ошибка операции при генерации облака слов для отчета {ReportId}", reportId);
+            return GenerateWordCloudUrl($"Ошибка+операции");
+        }
+        catch (HttpRequestException httpEx)
+        {
+            logger.LogError(httpEx, "Ошибка HTTP при генерации облака слов для отчета {ReportId}", reportId);
+            return GenerateWordCloudUrl($"Ошибка+сети");
         }
         catch (ArgumentException argEx)
         {
-            logger.LogError(argEx, "Error in UpdateSimilarPreviousReportsAsync");
+            logger.LogError(argEx, "Неверные аргументы при генерации облака слов для отчета {ReportId}", reportId);
+            return GenerateWordCloudUrl($"Неверные+данные");
         }
     }
 
-    public async Task<IEnumerable<ReportDto>> GetReportsByWorkAsync(string workId)
+    public string GenerateWordCloudUrl(string text)
     {
-        List<Report> reports = (await reportRepository.GetByWorkIdAsync(workId)).ToList();
-        List<ReportDto> result = new List<ReportDto>();
+        return $"https://quickchart.io/wordcloud?text={text}&width=600&height=400&backgroundColor=white&fontFamily=Arial";
+    }
+
+    private string ProcessTextForWordCloud(string text)
+    {
+        char[] separators = new[] { ' ', '\n', '\r', '\t', '.', ',', ';', '!', '?', ':', '(', ')', '[', ']', '{', '}', '"', '\'', '-', '_' };
+        HashSet<string> stopWords = new HashSet<string> { "the", "and", "is", "in", "to", "of", "a", "for", "on", "with", "as", "by", "at" };
         
-        foreach (Report report in reports)
+        Dictionary<string, int> wordCounts = text
+            .Split(separators, StringSplitOptions.RemoveEmptyEntries)
+            .Select(word => word.ToLowerInvariant())
+            .Where(word => word.Length > 2 && !stopWords.Contains(word) && !word.Any(character => char.IsDigit(character)))
+            .GroupBy(word => word)
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        if (!wordCounts.Any())
         {
-            try
+            return "Не+найдено+слов";
+        }
+
+        List<KeyValuePair<string, int>> topWords = wordCounts
+            .OrderByDescending(pair => pair.Value)
+            .Take(30)
+            .ToList();
+        
+        List<string> cloudText = new List<string>();
+        
+        foreach (KeyValuePair<string, int> word in topWords)
+        {
+            int repetitions = Math.Min(word.Value, 5);
+            
+            for (int i = 0; i < repetitions; i++)
             {
-                string fileContent = await fileContentProvider.GetFileContentAsync(report.FileId);
-                
-                if (string.IsNullOrWhiteSpace(fileContent))
-                {
-                    result.Add(resultBuilder.BuildReportDto(report, "Файл пустой", 0));
-                    continue;
-                }
-                
-                (bool hasPlagiarism, int similarity, List<string> similarStudents) = 
-                    await textAnalyzer.AnalyzeForPlagiarismAsync(
-                        fileContent, workId, report.FileId, report.StudentName);
-                
-                string resultText = resultBuilder.BuildResultText(
-                    hasPlagiarism, similarStudents, similarity, reports.Count);
-                
-                result.Add(resultBuilder.BuildReportDto(report, resultText, similarity));
-            }
-            catch (IOException ioEx)
-            {
-                logger.LogError(ioEx, "Ошибка ввода-вывода при обработке отчета {ReportId}", report.ReportId);
-                result.Add(resultBuilder.BuildErrorReportDto(
-                    new InvalidOperationException("Ошибка доступа к файлу отчета", ioEx), 
-                    report.FileId, report.WorkId, report.StudentName));
-            }
-            catch (UnauthorizedAccessException authEx)
-            {
-                logger.LogError(authEx, "Нет доступа к файлу отчета {ReportId}", report.ReportId);
-                result.Add(resultBuilder.BuildErrorReportDto(
-                    new InvalidOperationException("Нет доступа к файлу отчета", authEx), 
-                    report.FileId, report.WorkId, report.StudentName));
+                cloudText.Add(word.Key);
             }
         }
         
-        return result.OrderBy(report => report.CreatedAt).ToList();
-    }
-
-    public async Task<string> GenerateWordCloudAsync(Guid reportId)
-    {
-        return await wordCloudGenerator.GenerateWordCloudAsync(reportId);
+        return Uri.EscapeDataString(string.Join(" ", cloudText));
     }
 }
