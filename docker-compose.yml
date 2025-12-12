@@ -1,0 +1,37 @@
+﻿version: '3.8'
+
+services:
+  gateway:
+    build: 
+      context: ./Gateway
+      dockerfile: Dockerfile
+    ports:
+      - "6000:80"
+    environment:
+      - FILESTORAGE_URL=http://file-storage:80
+      - FILEANALYSIS_URL=http://file-analysis:80
+    depends_on:
+      - file-storage
+      - file-analysis
+
+  file-storage:
+    build: 
+      context: ./FileStorage
+      dockerfile: Dockerfile
+    ports:
+      - "5001:80"
+    volumes:
+      - filestorage_data:/app/files
+
+  file-analysis:
+    build: 
+      context: ./FileAnalysis
+      dockerfile: Dockerfile
+    ports:
+      - "5003:80"
+    volumes:
+      - fileanalysis_data:/app/data
+
+volumes:
+  filestorage_data:
+  fileanalysis_data:
